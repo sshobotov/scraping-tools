@@ -6,6 +6,9 @@ import com.amazonaws.util.IOUtils
 import io.atlassian.aws.s3._
 import io.atlassian.aws.{AmazonClient, AmazonClientConnectionDef, Credential, AwsAction => Action}
 
+import scala.sys.process._
+import scalaz.{-\/, \/-}
+
 object ApkAdsCredentials {
 
   def main(args: Array[String]): Unit = {
@@ -20,7 +23,7 @@ object ApkAdsCredentials {
       credential = Some(Credential.static(envAWSKeyID, envAWSSecretKey))
     ))
 
-    val action = S3.get(new ContentLocation(envS3Bucket, packagePath))
+    val actions = S3.get(new ContentLocation(envS3Bucket, packagePath))
       .flatMap { apk =>
         Action.safe { _ =>
           val pattern = """(.*/)?([^/]+)(\.apk)$""".r
@@ -36,8 +39,28 @@ object ApkAdsCredentials {
           toAnalyze.getAbsolutePath
         }
       }
+      .flatMap { localApk =>
+        Action.safe { _ =>
+          val tmpDir = System.getProperty("java.io.tmpdir")
+          val baseDirPath = path(tmpDir, "apkdecomp_" + System.currentTimeMillis)
+          s"""apktool decode -o $baseDirPath $localApk""".!!
+          s"""apktool build $baseDirPath""".!!
 
-    println(action.unsafePerform(s3Client).run)
+          val classesDexPath = path(baseDirPath, "build", "apk", "classes.dex")
+          val resultJarPath = path(baseDirPath, "classes.jar")
+          s"""dex2jar -o $resultJarPath $classesDexPath""".!!
+
+          val lookupPath = path(baseDirPath, "apksrc")
+          s"""java org.benf.cfr.reader.Main $resultJarPath --outputdir $lookupPath --silent true""".!!
+
+          lookupPath
+        }
+      }
+
+    actions.unsafePerform(s3Client).run match {
+      case \/-(result) => println(s"\n$result\n")
+      case -\/(error)  => error.toThrowable.printStackTrace(System.err)
+    }
   }
 
   def assertAndGetEnv(key: String): String = {
@@ -49,5 +72,7 @@ object ApkAdsCredentials {
     import com.amazonaws.services.s3.AmazonS3Client
     AmazonClient.withClientConfiguration[AmazonS3Client](conf, None)
   }
+
+  def path(parts: String*) = parts.mkString(File.separator)
 
 }
