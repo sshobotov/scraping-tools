@@ -2,15 +2,18 @@ package com.apptopia.labs.ads.cli
 
 import java.io.{File, FileOutputStream}
 
+import com.amazonaws.services.s3.AmazonS3
 import com.amazonaws.util.IOUtils
-import com.apptopia.labs.ads.dao.{GooglePlayAppFiles, GooglePlaySdkGeneralData, SdkApps}
 import com.typesafe.config.ConfigFactory
 import io.atlassian.aws.s3._
 import io.atlassian.aws.{AmazonClient, AmazonClientConnectionDef, Credential, AwsAction => Action}
 import io.getquill.{CassandraAsyncContext, SnakeCase}
 
+import com.apptopia.labs.ads.dao.{GooglePlayAppFiles, GooglePlaySdkGeneralData, SdkApps}
+
 import scala.concurrent.ExecutionContext.Implicits._
-import scala.concurrent.Future
+import scala.concurrent.duration.Duration
+import scala.concurrent.{Await, Future}
 import scala.sys.process._
 import scalaz.{-\/, \/-}
 
@@ -18,13 +21,22 @@ object ApkAdsCredentials {
 
   lazy val tmpDir = System.getProperty("java.io.tmpdir")
 
+  val adNetworks = Map(
+    "admob"      -> ("Google AdMob", findAdMobCred _),
+    "chartboost" -> ("Chartboost", findChartboostCred _)
+  )
+
   def main(args: Array[String]): Unit = {
+    assert(args.length > 0 && adNetworks.contains(args(0)),
+      s"Provide valid ad network name, supported: ${adNetworks.keys.mkString(" ,")}")
+    val (adNetwork, matchCred) = adNetworks(args(0))
+
     val config = ConfigFactory.load("local").withFallback(ConfigFactory.load())
     implicit val ctx = new CassandraAsyncContext[SnakeCase](config.getConfig("cassandra"))
 
     val toProcess =
-      if (args.length > 0) findPackageS3Path(args(0)) map { _.toList }
-      else retrieveAvailableS3Paths
+      if (args.length > 1) Future.successful(List(args(1)))//findPackageS3Path(args(1)) map { _.toList }
+      else retrieveAvailableS3Paths(adNetwork)
 
     val processed = toProcess flatMap {
       case paths if paths.nonEmpty =>
@@ -41,8 +53,12 @@ object ApkAdsCredentials {
           paths map { path =>
             val actions = extractApk(Bucket(storageConfig.getString("s3-bucket")), S3Key(path))
               .flatMap { extracted =>
-                Action.safe { _ => findAdMobCred(extracted) }
+                Action.safe { _ => matchCred(extracted) }
               }
+//            val actions = Action.ok[AmazonS3, S3MetaData, String]("/tmp/apkdecomp_1480433797143/apksrc")
+//              .flatMap { extracted =>
+//                Action.safe { _ => matchCred(extracted) }
+//              }
 
             Future { actions.unsafePerform(s3Client).run }
           }
@@ -51,13 +67,10 @@ object ApkAdsCredentials {
       case _ => Future.failed(new Exception("No files was found"))
     }
 
-    processed foreach {
-      _ foreach {
-        case \/-(result) => println(s"\n$result\n")
-        case -\/(error)  => error.toThrowable.printStackTrace(System.err)
-      }
+    Await.result(processed, Duration.Inf) foreach {
+      case \/-(result) => result.foreach(println)
+      case -\/(error)  => error.toThrowable.printStackTrace(System.err)
     }
-    processed.failed foreach { _.printStackTrace(System.err) }
   }
 
   def findPackageS3Path(packageName: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[Option[String]] = {
@@ -68,15 +81,15 @@ object ApkAdsCredentials {
     } map { _.headOption }
   }
 
-  def retrieveAvailableS3Paths(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[String]] = {
+  def retrieveAvailableS3Paths(adNetwork: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[String]] = {
     import ctx._
 
     for {
       ids <- ctx.run {
-        GooglePlaySdkGeneralData.withName("Google AdMob") map { _.id } take 1
+        GooglePlaySdkGeneralData.withName(adNetwork) map { _.id } take 1
       }
       apps <- ctx.run {
-        SdkApps.googlePlayAppsWithSdkId(ids.head) map { _.appId }
+        SdkApps.googlePlayAppsWithSdkId(ids.head) map { _.appId } take 5
       }
       paths <- Future.sequence(
         apps.map(findPackageS3Path)
@@ -123,7 +136,16 @@ object ApkAdsCredentials {
     }
 
   def findAdMobCred(sourcesPath: String) =
-    s"""grep -Rhs 'ca-app-pub-'""".!! split "\n" foreach println
+    s"""grep -Rso -hP ca-app-pub-[0-9]{16}/[0-9]{10} $sourcesPath""".lineStream_!
+
+  def findChartboostCred(sourcesPath: String) =
+    s"""grep -Rso -P [0-9a-f]{40} $sourcesPath""".lineStream_! flatMap { row =>
+      val filenameAndMatching = row.split(":")
+
+      s"""grep -Rso -hP [0-9a-f]{24} ${filenameAndMatching(0)}""".lineStream_! map {
+        (filenameAndMatching(1), _)
+      }
+    }
 
   def client(conf: AmazonClientConnectionDef) = {
     import com.amazonaws.services.s3.AmazonS3Client
