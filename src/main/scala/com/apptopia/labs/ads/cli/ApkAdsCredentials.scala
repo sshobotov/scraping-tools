@@ -2,7 +2,6 @@ package com.apptopia.labs.ads.cli
 
 import java.io.{File, FileOutputStream}
 
-import com.amazonaws.services.s3.AmazonS3
 import com.amazonaws.util.IOUtils
 import com.typesafe.config.ConfigFactory
 import io.atlassian.aws.s3._
@@ -35,7 +34,7 @@ object ApkAdsCredentials {
     implicit val ctx = new CassandraAsyncContext[SnakeCase](config.getConfig("cassandra"))
 
     val toProcess =
-      if (args.length > 1) Future.successful(List(args(1)))//findPackageS3Path(args(1)) map { _.toList }
+      if (args.length > 1) findPackageS3Path(args(1)) map { _.toList }
       else retrieveAvailableS3Paths(adNetwork)
 
     val processed = toProcess flatMap {
@@ -50,17 +49,13 @@ object ApkAdsCredentials {
         ))
 
         Future.sequence {
-          paths map { path =>
+          paths map { case (pkg, path) =>
             val actions = extractApk(Bucket(storageConfig.getString("s3-bucket")), S3Key(path))
               .flatMap { extracted =>
-                Action.safe { _ => matchCred(extracted) }
+                Action.safe { _ => matchCred(extracted).toSet }
               }
-//            val actions = Action.ok[AmazonS3, S3MetaData, String]("/tmp/apkdecomp_1480433797143/apksrc")
-//              .flatMap { extracted =>
-//                Action.safe { _ => matchCred(extracted) }
-//              }
 
-            Future { actions.unsafePerform(s3Client).run }
+            Future { (pkg, actions.unsafePerform(s3Client).run) }
           }
         }
 
@@ -68,20 +63,22 @@ object ApkAdsCredentials {
     }
 
     Await.result(processed, Duration.Inf) foreach {
-      case \/-(result) => result.foreach(println)
-      case -\/(error)  => error.toThrowable.printStackTrace(System.err)
+      case (pkg, \/-(result)) => println(s"\n$pkg:\n${result.mkString("\n")}\n")
+      case (pkg, -\/(error))  =>
+        System.err.println(s"$pkg:")
+        error.toThrowable.printStackTrace(System.err)
     }
   }
 
-  def findPackageS3Path(packageName: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[Option[String]] = {
+  def findPackageS3Path(packageName: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[Option[(String, String)]] = {
     import ctx._
 
     ctx.run {
       GooglePlayAppFiles.withPackageName(packageName) map { _.s3Key } take 1
-    } map { _.headOption }
+    } map { _.headOption.map { (packageName, _) } }
   }
 
-  def retrieveAvailableS3Paths(adNetwork: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[String]] = {
+  def retrieveAvailableS3Paths(adNetwork: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[(String, String)]] = {
     import ctx._
 
     for {
