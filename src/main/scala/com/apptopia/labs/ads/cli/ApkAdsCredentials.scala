@@ -101,10 +101,10 @@ object ApkAdsCredentials {
         GooglePlaySdkGeneralData.withName(adNetwork) map { _.id } take 1
       }
       apps <- ctx.run {
-        SdkApps.googlePlayAppsWithSdkId(ids.head) map { _.appId } take lift(args.limit())
+        SdkApps.googlePlayAppsWithSdkId(ids.head) map { _.appId } take lift(args.limit() + args.offset())
       }
       paths <- Future.sequence(
-        apps.map(findPackageS3Path)
+        apps.drop(args.offset()).map(findPackageS3Path)
       )
     } yield paths.flatten
   }
