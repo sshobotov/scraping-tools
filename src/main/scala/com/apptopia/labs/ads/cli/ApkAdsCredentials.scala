@@ -1,18 +1,19 @@
 package com.apptopia.labs.ads.cli
 
 import java.io.{File, FileOutputStream}
+import java.util.concurrent.Executors
 
 import com.amazonaws.util.IOUtils
 import com.typesafe.config.ConfigFactory
 import io.atlassian.aws.s3._
 import io.atlassian.aws.{AmazonClient, AmazonClientConnectionDef, Credential, AwsAction => Action}
 import io.getquill.{CassandraAsyncContext, SnakeCase}
-
 import com.apptopia.labs.ads.dao.{GooglePlayAppFiles, GooglePlaySdkGeneralData, SdkApps}
+import org.rogach.scallop._
 
-import scala.concurrent.ExecutionContext.Implicits._
+import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, Future}
+import scala.concurrent.{Await, Future, blocking}
 import scala.sys.process._
 import scalaz.{-\/, \/-}
 
@@ -25,17 +26,20 @@ object ApkAdsCredentials {
     "chartboost" -> ("Chartboost", findChartboostCred _)
   )
 
+  implicit val ec = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(
+    Runtime.getRuntime.availableProcessors - 1
+  ))
+
   def main(args: Array[String]): Unit = {
-    assert(args.length > 0 && adNetworks.contains(args(0)),
-      s"Provide valid ad network name, supported: ${adNetworks.keys.mkString(" ,")}")
-    val (adNetwork, matchCred) = adNetworks(args(0))
+    val arguments = new Arguments(args)
+    val (adNetwork, matchCred) = adNetworks(arguments.adNetworkName())
 
     val config = ConfigFactory.load("local").withFallback(ConfigFactory.load())
     implicit val ctx = new CassandraAsyncContext[SnakeCase](config.getConfig("cassandra"))
 
     val toProcess =
-      if (args.length > 1) findPackageS3Path(args(1)) map { _.toList }
-      else retrieveAvailableS3Paths(adNetwork)
+      if (arguments.packageName.isDefined) findPackageS3Path(arguments.packageName()) map { _.toList }
+      else retrieveAvailableS3Paths(adNetwork, arguments)
 
     val processed = toProcess flatMap {
       case paths if paths.nonEmpty =>
@@ -55,7 +59,9 @@ object ApkAdsCredentials {
                 Action.safe { _ => matchCred(extracted).toSet }
               }
 
-            Future { (pkg, actions.unsafePerform(s3Client).run) }
+            Future {
+              blocking { (pkg, actions.unsafePerform(s3Client).run) }
+            }
           }
         }
 
@@ -65,12 +71,12 @@ object ApkAdsCredentials {
     Await.result(processed, Duration.Inf) foreach {
       case (pkg, \/-(result)) =>
         println(s"\n$pkg:\n${if (result.isEmpty) "not found" else result.mkString("\n")}\n")
-        println("Done")
 
       case (pkg, -\/(error))  =>
         System.err.println(s"$pkg:")
         error.toThrowable.printStackTrace(System.err)
     }
+    println("Done")
   }
 
   def findPackageS3Path(packageName: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[Option[(String, String)]] = {
@@ -87,7 +93,7 @@ object ApkAdsCredentials {
     }
   }
 
-  def retrieveAvailableS3Paths(adNetwork: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[(String, String)]] = {
+  def retrieveAvailableS3Paths(adNetwork: String, args: Arguments)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[(String, String)]] = {
     import ctx._
 
     for {
@@ -95,7 +101,7 @@ object ApkAdsCredentials {
         GooglePlaySdkGeneralData.withName(adNetwork) map { _.id } take 1
       }
       apps <- ctx.run {
-        SdkApps.googlePlayAppsWithSdkId(ids.head) map { _.appId } take 1000
+        SdkApps.googlePlayAppsWithSdkId(ids.head) map { _.appId } take lift(args.limit())
       }
       paths <- Future.sequence(
         apps.map(findPackageS3Path)
@@ -167,5 +173,25 @@ object ApkAdsCredentials {
   }
 
   def path(parts: String*) = parts.mkString(File.separator)
+
+  private class Arguments(arguments: Seq[String]) extends ScallopConf(arguments) {
+    val packageName = opt[String](name = "package", descr = "Name of single package to process")
+
+    val offset = opt[Int](descr = "Number of packages to skip from the start", default = Some(0))
+    val limit = opt[Int](descr = "Number of packages to process", default = Some(100))
+
+    val adNetworkName = trailArg[String](descr = "Ad network to process")
+
+    validate(adNetworkName) { value =>
+      if (!adNetworks.contains(value))
+      Left(s"Provide valid ad network name, supported: ${adNetworks.keys.mkString(" ,")}")
+      else
+      Right(Unit)
+    }
+
+    conflicts(packageName, List(offset, limit))
+
+    verify()
+  }
 
 }

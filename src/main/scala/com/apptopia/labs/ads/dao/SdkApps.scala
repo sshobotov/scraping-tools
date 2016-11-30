@@ -25,6 +25,7 @@ object SdkApps {
         .filter(_.present == true)
         .filter(_.year == lift(year))
         .filter(_.sdkId == lift(sdkId))
+        .sortBy(_.date)(Ord.desc)
     }
   }
 

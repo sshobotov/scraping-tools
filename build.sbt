@@ -5,7 +5,7 @@ version := "0.0.1"
 scalaVersion := "2.11.8"
 
 libraryDependencies ++= Seq(
-  "org.rogach" %% "scallop" % "2.0.2",
+  "org.rogach" %% "scallop" % "2.0.5",
   "io.getquill" %% "quill-cassandra" % "0.10.0"
 )
 
