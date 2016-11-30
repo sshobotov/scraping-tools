@@ -63,7 +63,10 @@ object ApkAdsCredentials {
     }
 
     Await.result(processed, Duration.Inf) foreach {
-      case (pkg, \/-(result)) => println(s"\n$pkg:\n${result.mkString("\n")}\n")
+      case (pkg, \/-(result)) =>
+        println(s"\n$pkg:\n${if (result.isEmpty) "not found" else result.mkString("\n")}\n")
+        println("Done")
+
       case (pkg, -\/(error))  =>
         System.err.println(s"$pkg:")
         error.toThrowable.printStackTrace(System.err)
@@ -74,8 +77,14 @@ object ApkAdsCredentials {
     import ctx._
 
     ctx.run {
-      GooglePlayAppFiles.withPackageName(packageName) map { _.s3Key } take 1
-    } map { _.headOption.map { (packageName, _) } }
+      GooglePlayAppFiles.withPackageName(packageName)
+    } map {
+      _.filter(_.s3Key.nonEmpty).headOption map { entry =>
+        (packageName, entry.s3Key.get)
+      }
+    } recoverWith {
+      case e => Future.failed(new Exception(s"[$packageName] ${e.getMessage}", e.getCause))
+    }
   }
 
   def retrieveAvailableS3Paths(adNetwork: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[(String, String)]] = {
@@ -86,7 +95,7 @@ object ApkAdsCredentials {
         GooglePlaySdkGeneralData.withName(adNetwork) map { _.id } take 1
       }
       apps <- ctx.run {
-        SdkApps.googlePlayAppsWithSdkId(ids.head) map { _.appId } take 5
+        SdkApps.googlePlayAppsWithSdkId(ids.head) map { _.appId } take 1000
       }
       paths <- Future.sequence(
         apps.map(findPackageS3Path)
@@ -113,6 +122,8 @@ object ApkAdsCredentials {
       }
 
   def decompileApk(apkPath: String) = {
+    println(s"Decompiling $apkPath...")
+
     val baseDirPath = path(tmpDir, "apkdecomp_" + System.currentTimeMillis)
     s"""apktool decode -o $baseDirPath $apkPath""".!!
     s"""apktool build $baseDirPath""".!!
@@ -127,21 +138,27 @@ object ApkAdsCredentials {
     lookupPath
   }
 
-  def extractApk(s3Bucket: Bucket, packagePath: S3Key) =
+  def extractApk(s3Bucket: Bucket, packagePath: S3Key) = {
+    println(s"Downloading $packagePath...")
+
     download(s3Bucket, packagePath) flatMap { apk =>
       Action.safe { _ => decompileApk(apk) }
     }
+  }
 
   def findAdMobCred(sourcesPath: String) =
-    s"""grep -Rso -hP ca-app-pub-[0-9]{16}/[0-9]{10} $sourcesPath""".lineStream_!
+    s"""grep -Rso -P -h ca-app-pub-[0-9]{16}/[0-9]{10} $sourcesPath""".lineStream_!
 
   def findChartboostCred(sourcesPath: String) =
-    s"""grep -Rso -P [0-9a-f]{40} $sourcesPath""".lineStream_! flatMap { row =>
+    s"""grep -Rsow -P [0-9a-f]{40} $sourcesPath""".lineStream_! flatMap { row =>
       val filenameAndMatching = row.split(":")
 
-      s"""grep -Rso -hP [0-9a-f]{24} ${filenameAndMatching(0)}""".lineStream_! map {
+      val withAppID = s"""grep -Rsow -P -h [0-9a-f]{24} ${filenameAndMatching(0)}""".lineStream_! map {
         (filenameAndMatching(1), _)
       }
+      if (withAppID.isEmpty) println(s"DEBUG: $row")
+
+      withAppID
     }
 
   def client(conf: AmazonClientConnectionDef) = {
