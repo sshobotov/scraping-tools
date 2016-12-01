@@ -100,11 +100,9 @@ object ApkAdsCredentials {
       ids <- ctx.run {
         GooglePlaySdkGeneralData.withName(adNetwork) map { _.id } take 1
       }
-      apps <- ctx.run {
-        SdkApps.googlePlayAppsWithSdkId(ids.head) map { _.appId } take lift(args.limit() + args.offset())
-      }
+      apps <- fetchSdkAppsWithManualFiltering(args.offset(), args.limit())(ids.head)
       paths <- Future.sequence(
-        apps.drop(args.offset()).map(findPackageS3Path)
+        apps.map(findPackageS3Path)
       )
     } yield paths.flatten
   }
@@ -192,6 +190,34 @@ object ApkAdsCredentials {
     conflicts(packageName, List(offset, limit))
 
     verify()
+  }
+
+  // Workaround for Cassandra limitations
+  private def fetchSdkAppsWithManualFiltering(offset: Int, limit: Int)(id: Int)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[String]] = {
+    import ctx._
+
+    val queriedValueProbability = 0.05
+    type Entries = List[(String, Boolean)]
+
+    def fetchRecursively(offset: Int, preFilterOffset: Int = 0, acc: Entries = Nil): Future[Entries] = {
+      val queryLimit = ((limit + offset) / queriedValueProbability).toInt + preFilterOffset
+
+      ctx.run {
+        SdkApps.googlePlayAppsWithSdkId(id)
+          .map(row => (row.appId, row.active))
+          .take(lift(queryLimit))
+      } flatMap { rows =>
+        val filtered = rows.drop(preFilterOffset).filter{_._2}.drop(offset)
+
+        if (filtered.lengthCompare(limit) < 0)
+          fetchRecursively(0, queryLimit, acc ++ filtered)
+        else
+          Future.successful(acc ++ filtered)
+      }
+    }
+    fetchRecursively(offset) map {
+      _ take limit map { _._1 }
+    }
   }
 
 }
