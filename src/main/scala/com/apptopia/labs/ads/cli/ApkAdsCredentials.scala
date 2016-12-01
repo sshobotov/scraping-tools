@@ -197,7 +197,7 @@ object ApkAdsCredentials {
     import ctx._
 
     val queriedValueProbability = 0.05
-    type Entries = List[(String, Boolean)]
+    type Entries = List[(String, Option[Boolean])]
 
     def fetchRecursively(offset: Int, preFilterOffset: Int = 0, acc: Entries = Nil): Future[Entries] = {
       val queryLimit = ((limit + offset) / queriedValueProbability).toInt + preFilterOffset
@@ -207,7 +207,10 @@ object ApkAdsCredentials {
           .map(row => (row.appId, row.active))
           .take(lift(queryLimit))
       } flatMap { rows =>
-        val filtered = rows.drop(preFilterOffset).filter{_._2}.drop(offset)
+        val filtered = rows
+          .drop(preFilterOffset)
+          .filter{_._2.getOrElse(false)}
+          .drop(offset)
 
         if (filtered.lengthCompare(limit) < 0)
           fetchRecursively(0, queryLimit, acc ++ filtered)
