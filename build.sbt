@@ -6,7 +6,8 @@ scalaVersion := "2.11.8"
 
 libraryDependencies ++= Seq(
   "org.rogach" %% "scallop" % "2.0.5",
-  "io.getquill" %% "quill-cassandra" % "0.10.0"
+  "io.getquill" %% "quill-cassandra" % "0.10.0",
+  "org.slf4j" % "slf4j-log4j12" %"1.7.21"
 )
 
 val atlassianAwsVersion = "7.0.0"
@@ -24,3 +25,10 @@ libraryDependencies ++= Seq(
   "io.circe" %% "circe-parser"
 ).map(_ % circeVersion)
 
+assemblyMergeStrategy in assembly := {
+  case path if path.endsWith(".properties") =>
+    MergeStrategy.first
+  case x =>
+    val oldStrategy = (assemblyMergeStrategy in assembly).value
+    oldStrategy(x)
+}

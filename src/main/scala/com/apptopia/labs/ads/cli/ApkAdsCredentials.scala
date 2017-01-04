@@ -1,9 +1,11 @@
 package com.apptopia.labs.ads.cli
 
 import java.io.{File, FileOutputStream}
+import java.time.LocalDateTime
 import java.util.concurrent.Executors
 
 import com.amazonaws.util.IOUtils
+import com.apptopia.labs.ads.LogProvider
 import com.typesafe.config.ConfigFactory
 import io.atlassian.aws.s3._
 import io.atlassian.aws.{AmazonClient, AmazonClientConnectionDef, Credential, AwsAction => Action}
@@ -17,13 +19,14 @@ import scala.concurrent.{Await, Future, blocking}
 import scala.sys.process._
 import scalaz.{-\/, \/-}
 
-object ApkAdsCredentials {
+object ApkAdsCredentials extends LogProvider {
 
   lazy val tmpDir = System.getProperty("java.io.tmpdir")
 
   val adNetworks = Map(
-    "admob"      -> ("Google AdMob", findAdMobCred _),
-    "chartboost" -> ("Chartboost", findChartboostCred _)
+    "admob"       -> ("Google AdMob", findAdMobCred _),
+    "chartboost"  -> ("Chartboost", findChartboostCred _),
+    "revmob"      -> ("Revmob", findRevmobCred _)
   )
 
   implicit val ec = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(
@@ -43,6 +46,7 @@ object ApkAdsCredentials {
 
     val processed = toProcess flatMap {
       case paths if paths.nonEmpty =>
+        log.info("Processing fetched paths...")
         val storageConfig = config.getConfig("apk.storage")
 
         val s3Client = client(AmazonClientConnectionDef.default.copy(
@@ -70,13 +74,13 @@ object ApkAdsCredentials {
 
     Await.result(processed, Duration.Inf) foreach {
       case (pkg, \/-(result)) =>
-        println(s"\n$pkg:\n${if (result.isEmpty) "not found" else result.mkString("\n")}\n")
+        log.info(s"\n$pkg:\n${if (result.isEmpty) "not found" else result.mkString("\n")}\n")
 
       case (pkg, -\/(error))  =>
-        System.err.println(s"$pkg:")
+        log.error(s"$pkg:")
         error.toThrowable.printStackTrace(System.err)
     }
-    println("Done")
+    log.info("Done")
   }
 
   def findPackageS3Path(packageName: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[Option[(String, String)]] = {
@@ -94,6 +98,7 @@ object ApkAdsCredentials {
   }
 
   def retrieveAvailableS3Paths(adNetwork: String, args: Arguments)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[(String, String)]] = {
+    log.info(s"Fetching s3 paths for $adNetwork with offset ${args.offset()} and limit ${args.limit()}...")
     import ctx._
 
     for {
@@ -126,7 +131,7 @@ object ApkAdsCredentials {
       }
 
   def decompileApk(apkPath: String) = {
-    println(s"Decompiling $apkPath...")
+    log.info(s"Decompiling $apkPath...")
 
     val baseDirPath = path(tmpDir, "apkdecomp_" + System.currentTimeMillis)
     s"""apktool decode -o $baseDirPath $apkPath""".!!
@@ -143,7 +148,7 @@ object ApkAdsCredentials {
   }
 
   def extractApk(s3Bucket: Bucket, packagePath: S3Key) = {
-    println(s"Downloading $packagePath...")
+    log.info(s"Downloading $packagePath...")
 
     download(s3Bucket, packagePath) flatMap { apk =>
       Action.safe { _ => decompileApk(apk) }
@@ -160,10 +165,13 @@ object ApkAdsCredentials {
       val withAppID = s"""grep -Rsow -P -h [0-9a-f]{24} ${filenameAndMatching(0)}""".lineStream_! map {
         (filenameAndMatching(1), _)
       }
-      if (withAppID.isEmpty) println(s"DEBUG: $row")
+      if (withAppID.isEmpty) log.info(s"Only first match for: $row")
 
       withAppID
     }
+
+  def findRevmobCred(sourcesPath: String) =
+    s"""grep -Rsow -P -h [0-9a-f]{24} $sourcesPath""".lineStream_!
 
   def client(conf: AmazonClientConnectionDef) = {
     import com.amazonaws.services.s3.AmazonS3Client
@@ -201,9 +209,10 @@ object ApkAdsCredentials {
 
     def fetchRecursively(offset: Int, preFilterOffset: Int = 0, acc: Entries = Nil): Future[Entries] = {
       val queryLimit = ((limit + offset) / queriedValueProbability).toInt + preFilterOffset
+      log.info(s"Doing SdkApps.googlePlayAppsWithSdkId($id) request...")
 
       ctx.run {
-        SdkApps.googlePlayAppsWithSdkId(id)
+        SdkApps.googlePlayAppsWithSdkId(id, year = LocalDateTime.now.minusMonths(3).getYear)
           .map(row => (row.appId, row.active))
           .take(lift(queryLimit))
       } flatMap { rows =>
@@ -212,7 +221,7 @@ object ApkAdsCredentials {
           .filter{_._2.getOrElse(false)}
           .drop(offset)
 
-        if (filtered.lengthCompare(limit) < 0)
+        if (rows.lengthCompare(queryLimit) >= 0 && filtered.lengthCompare(limit) < 0)
           fetchRecursively(0, queryLimit, acc ++ filtered)
         else
           Future.successful(acc ++ filtered)
