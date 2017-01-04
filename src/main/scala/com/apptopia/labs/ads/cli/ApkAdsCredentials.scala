@@ -218,7 +218,7 @@ object ApkAdsCredentials extends LogProvider {
       } flatMap { rows =>
         val filtered = rows
           .drop(preFilterOffset)
-          .filter{_._2.getOrElse(false)}
+          .filter{_._2.getOrElse(true)}
           .drop(offset)
 
         if (rows.lengthCompare(queryLimit) >= 0 && filtered.lengthCompare(limit) < 0)
