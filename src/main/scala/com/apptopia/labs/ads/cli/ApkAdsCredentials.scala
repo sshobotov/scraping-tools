@@ -26,7 +26,8 @@ object ApkAdsCredentials extends LogProvider {
   val adNetworks = Map(
     "admob"       -> ("Google AdMob", findAdMobCred _),
     "chartboost"  -> ("Chartboost", findChartboostCred _),
-    "revmob"      -> ("Revmob", findRevmobCred _)
+    "revmob"      -> ("Revmob", findRevmobCred _),
+    "vungle"      -> ("Vungle", findVungleCred _)
   )
 
   implicit val ec = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(
@@ -171,6 +172,9 @@ object ApkAdsCredentials extends LogProvider {
     }
 
   def findRevmobCred(sourcesPath: String) =
+    s"""grep -Rsow -P -h [0-9a-f]{24} $sourcesPath""".lineStream_!
+
+  def findVungleCred(sourcesPath: String) =
     s"""grep -Rsow -P -h [0-9a-f]{24} $sourcesPath""".lineStream_!
 
   def client(conf: AmazonClientConnectionDef) = {
