@@ -5,8 +5,8 @@ version := "0.0.1"
 scalaVersion := "2.11.8"
 
 libraryDependencies ++= Seq(
-  "org.rogach" %% "scallop" % "2.0.5",
-  "io.getquill" %% "quill-cassandra" % "0.10.0",
+  "org.rogach" %% "scallop" % "2.1.1",
+  "io.getquill" %% "quill-cassandra" % "1.1.0",
   "org.slf4j" % "slf4j-log4j12" %"1.7.21"
 )
 
@@ -32,3 +32,5 @@ assemblyMergeStrategy in assembly := {
     val oldStrategy = (assemblyMergeStrategy in assembly).value
     oldStrategy(x)
 }
+
+mainClass in (Compile, run) := Some("com.apptopia.labs.ads.cli.ApkAdsCredentials")

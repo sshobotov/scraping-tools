@@ -1,6 +1,6 @@
 package com.apptopia.labs.ads.cli
 
-import java.io.{File, FileOutputStream}
+import java.io.{File, FileOutputStream, FileWriter, PrintWriter}
 import java.time.LocalDateTime
 import java.util.concurrent.Executors
 
@@ -27,7 +27,8 @@ object ApkAdsCredentials extends LogProvider {
     "admob"       -> ("Google AdMob", findAdMobCred _),
     "chartboost"  -> ("Chartboost", findChartboostCred _),
     "revmob"      -> ("Revmob", findRevmobCred _),
-    "vungle"      -> ("Vungle", findVungleCred _)
+    "vungle"      -> ("Vungle", findVungleCred _),
+    "facebook"    -> ("Facebook Audience Network", findFacebookAudienceCred _)
   )
 
   implicit val ec = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(
@@ -42,12 +43,19 @@ object ApkAdsCredentials extends LogProvider {
     implicit val ctx = new CassandraAsyncContext[SnakeCase](config.getConfig("cassandra"))
 
     val toProcess =
-      if (arguments.packageName.isDefined) findPackageS3Path(arguments.packageName()) map { _.toList }
-      else retrieveAvailableS3Paths(adNetwork, arguments)
+      arguments.packageName.toOption map { packageName =>
+        findPackageS3Path(packageName) map { _.toList }
+      } getOrElse {
+        retrieveAvailableS3Paths(adNetwork, arguments)
+      }
 
+    val fileOutput = arguments.outputFile.toOption.map { file =>
+      if (!file.exists) file.createNewFile()
+      new PrintWriter(new FileWriter(file, true))
+    }
     val processed = toProcess flatMap {
       case paths if paths.nonEmpty =>
-        log.info("Processing fetched paths...")
+        log.debug("Processing fetched paths...")
         val storageConfig = config.getConfig("apk.storage")
 
         val s3Client = client(AmazonClientConnectionDef.default.copy(
@@ -65,7 +73,16 @@ object ApkAdsCredentials extends LogProvider {
               }
 
             Future {
-              blocking { (pkg, actions.unsafePerform(s3Client).run) }
+              blocking { actions.unsafePerform(s3Client).run }
+            } map { result =>
+              for {
+                out         <- fileOutput
+                credentials <- result.toOption
+              } yield credentials.foreach { entry =>
+                out.append(s"$pkg $entry")
+              }
+
+              (pkg, result)
             }
           }
         }
@@ -73,18 +90,47 @@ object ApkAdsCredentials extends LogProvider {
       case _ => Future.failed(new Exception("No files was found"))
     }
 
-    Await.result(processed, Duration.Inf) foreach {
-      case (pkg, \/-(result)) =>
-        log.info(s"\n$pkg:\n${if (result.isEmpty) "not found" else result.mkString("\n")}\n")
+    case class Collected(ok: Seq[(String, Any)], notFound: Seq[String], err: Seq[(String, Throwable)])
 
-      case (pkg, -\/(error))  =>
-        log.error(s"$pkg:")
-        error.toThrowable.printStackTrace(System.err)
+    val collected = Await.result(processed, Duration.Inf)
+      .foldLeft[Collected](Collected(Seq.empty, Seq.empty, Seq.empty)) {
+        case (acc, (pkg, \/-(result))) =>
+          if (result.nonEmpty) {
+            acc.copy(ok = acc.ok ++ result.map((pkg, _)))
+          } else {
+            acc.copy(notFound = acc.notFound :+ pkg)
+          }
+
+        case (acc, (pkg, -\/(error))) =>
+          acc.copy(err = acc.err :+ (pkg, error.toThrowable))
+      }
+
+    fileOutput.foreach(_.close)
+
+    log.info(s"Found credential entries:   ${collected.ok.size}")
+    log.info(s"Packages with no entries:   ${collected.notFound.size}")
+    log.info(s"Packages failed to process: ${collected.err.size}")
+
+    if (fileOutput.isEmpty && collected.ok.nonEmpty) {
+      log.info("\nFound:")
+      collected.ok foreach { case (pkg, entry) =>
+        log.info(s"$pkg $entry")
+      }
     }
-    log.info("Done")
+    if (collected.notFound.nonEmpty) {
+      log.debug("\nNo matches:")
+      collected.notFound foreach log.debug
+    }
+    if (collected.err.nonEmpty) {
+      log.warn("\nErrors:")
+      collected.err foreach { case (pkg, e) =>
+        log.warn(pkg, e)
+      }
+    }
   }
 
-  def findPackageS3Path(packageName: String)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[Option[(String, String)]] = {
+  def findPackageS3Path(packageName: String)
+                       (implicit ctx: CassandraAsyncContext[SnakeCase]): Future[Option[(String, String)]] = {
     import ctx._
 
     ctx.run {
@@ -98,8 +144,9 @@ object ApkAdsCredentials extends LogProvider {
     }
   }
 
-  def retrieveAvailableS3Paths(adNetwork: String, args: Arguments)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[(String, String)]] = {
-    log.info(s"Fetching s3 paths for $adNetwork with offset ${args.offset()} and limit ${args.limit()}...")
+  def retrieveAvailableS3Paths(adNetwork: String, args: Arguments)
+                              (implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[(String, String)]] = {
+    log.debug(s"Fetching s3 paths for $adNetwork with offset ${args.offset()} and limit ${args.limit()}...")
     import ctx._
 
     for {
@@ -132,7 +179,7 @@ object ApkAdsCredentials extends LogProvider {
       }
 
   def decompileApk(apkPath: String) = {
-    log.info(s"Decompiling $apkPath...")
+    log.debug(s"Decompiling $apkPath...")
 
     val baseDirPath = path(tmpDir, "apkdecomp_" + System.currentTimeMillis)
     s"""apktool decode -o $baseDirPath $apkPath""".!!
@@ -149,7 +196,7 @@ object ApkAdsCredentials extends LogProvider {
   }
 
   def extractApk(s3Bucket: Bucket, packagePath: S3Key) = {
-    log.info(s"Downloading $packagePath...")
+    log.debug(s"Downloading $packagePath...")
 
     download(s3Bucket, packagePath) flatMap { apk =>
       Action.safe { _ => decompileApk(apk) }
@@ -163,7 +210,7 @@ object ApkAdsCredentials extends LogProvider {
     s"""grep -Rsow -P [0-9a-f]{40} $sourcesPath""".lineStream_! flatMap { row =>
       val filenameAndMatching = row.split(":")
 
-      val withAppID = s"""grep -Rsow -P -h [0-9a-f]{24} ${filenameAndMatching(0)}""".lineStream_! map {
+      val withAppID = find24SymbolsHex(filenameAndMatching(0)) map {
         (filenameAndMatching(1), _)
       }
       if (withAppID.isEmpty) log.info(s"Only first match for: $row")
@@ -171,10 +218,14 @@ object ApkAdsCredentials extends LogProvider {
       withAppID
     }
 
-  def findRevmobCred(sourcesPath: String) =
-    s"""grep -Rsow -P -h [0-9a-f]{24} $sourcesPath""".lineStream_!
+  def findRevmobCred(sourcesPath: String) = find24SymbolsHex(sourcesPath)
 
-  def findVungleCred(sourcesPath: String) =
+  def findVungleCred(sourcesPath: String) = find24SymbolsHex(sourcesPath)
+
+  def findFacebookAudienceCred(sourcesPath: String) =
+    s"""grep -Rsow -P -h [0-9]{16}_[0-9]{16} $sourcesPath""".lineStream_!
+
+  def find24SymbolsHex(sourcesPath: String) =
     s"""grep -Rsow -P -h [0-9a-f]{24} $sourcesPath""".lineStream_!
 
   def client(conf: AmazonClientConnectionDef) = {
@@ -189,23 +240,25 @@ object ApkAdsCredentials extends LogProvider {
 
     val offset = opt[Int](descr = "Number of packages to skip from the start", default = Some(0))
     val limit = opt[Int](descr = "Number of packages to process", default = Some(100))
+    val outputFile = opt[File](descr = "File path to output results to")
 
     val adNetworkName = trailArg[String](descr = "Ad network to process")
 
     validate(adNetworkName) { value =>
       if (!adNetworks.contains(value))
-      Left(s"Provide valid ad network name, supported: ${adNetworks.keys.mkString(" ,")}")
+        Left(s"Provide valid ad network name, supported: ${adNetworks.keys.mkString(" ,")}")
       else
-      Right(Unit)
+        Right(Unit)
     }
 
-    conflicts(packageName, List(offset, limit))
+    conflicts(packageName, List(offset, limit, outputFile))
 
     verify()
   }
 
   // Workaround for Cassandra limitations
-  private def fetchSdkAppsWithManualFiltering(offset: Int, limit: Int)(id: Int)(implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[String]] = {
+  private def fetchSdkAppsWithManualFiltering(offset: Int, limit: Int)(id: Int)
+                                             (implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[String]] = {
     import ctx._
 
     val queriedValueProbability = 0.05
@@ -213,7 +266,7 @@ object ApkAdsCredentials extends LogProvider {
 
     def fetchRecursively(offset: Int, preFilterOffset: Int = 0, acc: Entries = Nil): Future[Entries] = {
       val queryLimit = ((limit + offset) / queriedValueProbability).toInt + preFilterOffset
-      log.info(s"Doing SdkApps.googlePlayAppsWithSdkId($id) request...")
+      log.debug(s"Doing SdkApps.googlePlayAppsWithSdkId($id) request...")
 
       ctx.run {
         SdkApps.googlePlayAppsWithSdkId(id, year = LocalDateTime.now.minusMonths(3).getYear)

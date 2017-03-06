@@ -8,14 +8,7 @@
         </layout>
     </appender>
     <appender name="FILE" class="org.apache.log4j.DailyRollingFileAppender">
-        <param name="file" value="logs/scheduler.log"/>
-        <layout class="org.apache.log4j.PatternLayout">
-            <param name="ConversionPattern" value="%d{yy/MM/dd HH:mm:ss} %p %c{1}: %m%n"/>
-        </layout>
-    </appender>
-    <appender name="SYSLOG" class="org.apache.log4j.net.SyslogAppender">
-        <param name="SyslogHost" value="logs.labs.apptopia.net:516"/>
-        <param name="Header" value="true"/>
+        <param name="file" value="logs/tooling.log"/>
         <layout class="org.apache.log4j.PatternLayout">
             <param name="ConversionPattern" value="%d{yy/MM/dd HH:mm:ss} %p %c{1}: %m%n"/>
         </layout>
@@ -24,6 +17,5 @@
         <level value="info"/>
         <appender-ref ref="CONSOLE"/>
         <appender-ref ref="FILE"/>
-        <appender-ref ref="SYSLOG"/>
     </root>
 </log4j:configuration>

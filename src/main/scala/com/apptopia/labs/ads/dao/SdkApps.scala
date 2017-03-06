@@ -11,7 +11,7 @@ object SdkApps {
     import ctx._
 
     quote {
-      query[SdkApp].schema(_.entity("tinkerbell.sdk_apps"))
+      querySchema[SdkApp]("tinkerbell.sdk_apps")
     }
   }
 

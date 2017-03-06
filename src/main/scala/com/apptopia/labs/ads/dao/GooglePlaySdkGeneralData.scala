@@ -9,7 +9,7 @@ object GooglePlaySdkGeneralData {
     import ctx._
 
     quote {
-      query[models.GooglePlaySdkGeneralData].schema(_.entity("boglach.canonic_google_play_sdk_general_data"))
+      querySchema[models.GooglePlaySdkGeneralData]("boglach.canonic_google_play_sdk_general_data")
     }
   }
 

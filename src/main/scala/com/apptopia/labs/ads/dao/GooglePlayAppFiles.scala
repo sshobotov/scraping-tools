@@ -9,7 +9,7 @@ object GooglePlayAppFiles {
     import ctx._
 
     quote {
-      query[GooglePlayAppFile].schema(_.entity("boglach.canonic_google_play_app_files"))
+      querySchema[GooglePlayAppFile]("boglach.canonic_google_play_app_files")
     }
   }
 
