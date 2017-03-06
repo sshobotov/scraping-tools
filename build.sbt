@@ -7,7 +7,8 @@ scalaVersion := "2.11.8"
 libraryDependencies ++= Seq(
   "org.rogach" %% "scallop" % "2.1.1",
   "io.getquill" %% "quill-cassandra" % "1.1.0",
-  "org.slf4j" % "slf4j-log4j12" %"1.7.21"
+  "org.slf4j" % "slf4j-log4j12" %"1.7.21",
+  "org.apache.commons" % "commons-io" % "1.3.2"
 )
 
 val atlassianAwsVersion = "7.0.0"

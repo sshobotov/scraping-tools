@@ -1,6 +1,7 @@
 package com.apptopia.labs.ads.cli
 
 import java.io.{File, FileOutputStream, FileWriter, PrintWriter}
+import java.nio.file.{Files, Paths}
 import java.time.LocalDateTime
 import java.util.concurrent.Executors
 
@@ -11,12 +12,14 @@ import io.atlassian.aws.s3._
 import io.atlassian.aws.{AmazonClient, AmazonClientConnectionDef, Credential, AwsAction => Action}
 import io.getquill.{CassandraAsyncContext, SnakeCase}
 import com.apptopia.labs.ads.dao.{GooglePlayAppFiles, GooglePlaySdkGeneralData, SdkApps}
+import org.apache.commons.io.FileUtils
 import org.rogach.scallop._
 
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, Future, blocking}
 import scala.sys.process._
+import scala.util.{Failure, Try}
 import scalaz.{-\/, \/-}
 
 object ApkAdsCredentials extends LogProvider {
@@ -66,10 +69,17 @@ object ApkAdsCredentials extends LogProvider {
         ))
 
         Future.sequence {
-          paths map { case (pkg, path) =>
-            val actions = extractApk(Bucket(storageConfig.getString("s3-bucket")), S3Key(path))
+          paths map { case (pkg, s3Path) =>
+            val destinationDir = path(tmpDir, s"extracted_${pkg}_${System.currentTimeMillis}")
+            val actions = extractApk(Bucket(storageConfig.getString("s3-bucket")), S3Key(s3Path), destinationDir)
               .flatMap { extracted =>
-                Action.safe { _ => matchCred(extracted).toSet }
+                Action.safe { _ =>
+                  withFinally {
+                    matchCred(extracted).toSet
+                  } {
+                    FileUtils.deleteDirectory(Paths.get(destinationDir).toFile)
+                  }
+                }
               }
 
             Future {
@@ -167,39 +177,44 @@ object ApkAdsCredentials extends LogProvider {
           val pattern = """(.*/)?([^/]+)(\.apk)$""".r
           val pattern(_, prefix, suffix) = apk.getKey
 
-          val toAnalyze = {
-            val file = File.createTempFile(prefix + "_", suffix)
-            file.deleteOnExit()
-            file
+          val toAnalyze = File.createTempFile(prefix + "_", suffix)
+          ifInterrupted {
+            IOUtils.copy(apk.getObjectContent, new FileOutputStream(toAnalyze))
+          } {
+            toAnalyze.delete()
           }
-          IOUtils.copy(apk.getObjectContent, new FileOutputStream(toAnalyze))
 
           toAnalyze.getAbsolutePath
         }
       }
 
-  def decompileApk(apkPath: String) = {
+  def decompileApk(apkPath: String, destinationDir: String) = {
     log.debug(s"Decompiling $apkPath...")
 
-    val baseDirPath = path(tmpDir, "apkdecomp_" + System.currentTimeMillis)
-    s"""apktool decode -o $baseDirPath $apkPath""".!!
-    s"""apktool build $baseDirPath""".!!
+    s"""apktool decode -o $destinationDir $apkPath""".!!
+    s"""apktool build $destinationDir""".!!
 
-    val classesDexPath = path(baseDirPath, "build", "apk", "classes.dex")
-    val resultJarPath = path(baseDirPath, "classes.jar")
+    val classesDexPath = path(destinationDir, "build", "apk", "classes.dex")
+    val resultJarPath = path(destinationDir, "classes.jar")
     s"""dex2jar -o $resultJarPath $classesDexPath""".!!
 
-    val lookupPath = path(baseDirPath, "apksrc")
+    val lookupPath = path(destinationDir, "apksrc")
     s"""java org.benf.cfr.reader.Main $resultJarPath --outputdir $lookupPath --silent true""".!!
 
     lookupPath
   }
 
-  def extractApk(s3Bucket: Bucket, packagePath: S3Key) = {
+  def extractApk(s3Bucket: Bucket, packagePath: S3Key, destinationDir: String) = {
     log.debug(s"Downloading $packagePath...")
 
     download(s3Bucket, packagePath) flatMap { apk =>
-      Action.safe { _ => decompileApk(apk) }
+      Action.safe { _ =>
+        withFinally {
+          decompileApk(apk, destinationDir)
+        } {
+          Files.delete(Paths.get(apk))
+        }
+      }
     }
   }
 
@@ -232,8 +247,6 @@ object ApkAdsCredentials extends LogProvider {
     import com.amazonaws.services.s3.AmazonS3Client
     AmazonClient.withClientConfiguration[AmazonS3Client](conf, None)
   }
-
-  def path(parts: String*) = parts.mkString(File.separator)
 
   private class Arguments(arguments: Seq[String]) extends ScallopConf(arguments) {
     val packageName = opt[String](name = "package", descr = "Name of single package to process")
@@ -287,6 +300,24 @@ object ApkAdsCredentials extends LogProvider {
     fetchRecursively(offset) map {
       _ take limit map { _._1 }
     }
+  }
+
+  private def path(parts: String*) = parts.mkString(File.separator)
+
+  private def ifInterrupted[T](block: => T)(interruptedBlock: => Unit): T = {
+    Try { block }
+      .recoverWith { case e =>
+        interruptedBlock
+        Failure(e)
+      }
+      .get
+  }
+
+  private def withFinally[T](block: => T)(finallyBlock: => Unit): T = {
+    val result = Try { block }
+    finallyBlock
+
+    result.get
   }
 
 }
