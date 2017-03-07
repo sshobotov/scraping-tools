@@ -31,7 +31,8 @@ object ApkAdsCredentials extends LogProvider {
     "chartboost"  -> ("Chartboost", findChartboostCred _),
     "revmob"      -> ("Revmob", findRevmobCred _),
     "vungle"      -> ("Vungle", findVungleCred _),
-    "facebook"    -> ("Facebook Audience Network", findFacebookAudienceCred _)
+    "facebook"    -> ("Facebook Audience Network", findFacebookAudienceCred _),
+    "adcolony"    -> ("AdColony", findAdColonyCred _)
   )
 
   implicit val ec = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(
@@ -87,10 +88,8 @@ object ApkAdsCredentials extends LogProvider {
             } map { result =>
               for {
                 out         <- fileOutput
-                credentials <- result.toOption
-              } yield credentials.foreach { entry =>
-                out.append(s"$pkg $entry")
-              }
+                credentials <- result.toOption if credentials.nonEmpty
+              } yield out.println(s"$pkg ${credentials.mkString("[", ", ", "]")}")
 
               (pkg, result)
             }
@@ -100,19 +99,19 @@ object ApkAdsCredentials extends LogProvider {
       case _ => Future.failed(new Exception("No files was found"))
     }
 
-    case class Collected(ok: Seq[(String, Any)], notFound: Seq[String], err: Seq[(String, Throwable)])
+    case class Collected(ok: Seq[(String, Seq[Any])], notFound: Seq[String], err: Seq[(String, Throwable)])
 
     val collected = Await.result(processed, Duration.Inf)
       .foldLeft[Collected](Collected(Seq.empty, Seq.empty, Seq.empty)) {
         case (acc, (pkg, \/-(result))) =>
           if (result.nonEmpty) {
-            acc.copy(ok = acc.ok ++ result.map((pkg, _)))
+            acc.copy(ok = acc.ok :+ (pkg, result.toSeq))
           } else {
             acc.copy(notFound = acc.notFound :+ pkg)
           }
 
         case (acc, (pkg, -\/(error))) =>
-          acc.copy(err = acc.err :+ (pkg, error.toThrowable))
+          acc.copy(err = acc.err :+ (pkg, error.toThrowable.getCause))
       }
 
     fileOutput.foreach(_.close)
@@ -124,7 +123,7 @@ object ApkAdsCredentials extends LogProvider {
     if (fileOutput.isEmpty && collected.ok.nonEmpty) {
       log.info("\nFound:")
       collected.ok foreach { case (pkg, entry) =>
-        log.info(s"$pkg $entry")
+        log.info(s"$pkg ${entry.mkString("[", ", ", "]")}")
       }
     }
     if (collected.notFound.nonEmpty) {
@@ -228,7 +227,7 @@ object ApkAdsCredentials extends LogProvider {
       val withAppID = find24SymbolsHex(filenameAndMatching(0)) map {
         (filenameAndMatching(1), _)
       }
-      if (withAppID.isEmpty) log.info(s"Only first match for: $row")
+      if (withAppID.isEmpty) log.warn(s"Only first match for: $row")
 
       withAppID
     }
@@ -240,7 +239,19 @@ object ApkAdsCredentials extends LogProvider {
   def findFacebookAudienceCred(sourcesPath: String) =
     s"""grep -Rsow -P -h [0-9]{16}_[0-9]{16} $sourcesPath""".lineStream_!
 
-  def find24SymbolsHex(sourcesPath: String) =
+  def findAdColonyCred(sourcesPath: String) =
+    s"""grep -Rsow -P app[0-9a-f]{18} $sourcesPath""".lineStream_! flatMap { row =>
+      val filenameAndMatching = row.split(":")
+
+      val withAppID = s"""grep -Rsow -P vz[0-9a-f]{18} ${filenameAndMatching(0)}""".lineStream_! map {
+        (filenameAndMatching(1), _)
+      }
+      if (withAppID.isEmpty) log.warn(s"Only first match for: $row")
+
+      withAppID
+    }
+
+  private def find24SymbolsHex(sourcesPath: String) =
     s"""grep -Rsow -P -h [0-9a-f]{24} $sourcesPath""".lineStream_!
 
   def client(conf: AmazonClientConnectionDef) = {
