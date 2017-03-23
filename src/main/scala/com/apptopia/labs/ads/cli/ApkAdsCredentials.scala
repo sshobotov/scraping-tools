@@ -2,7 +2,6 @@ package com.apptopia.labs.ads.cli
 
 import java.io.{File, FileOutputStream, FileWriter, PrintWriter}
 import java.nio.file.{Files, Paths}
-import java.time.LocalDateTime
 import java.util.concurrent.Executors
 
 import com.amazonaws.util.IOUtils
@@ -19,10 +18,11 @@ import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.Duration
 import scala.concurrent.{Await, Future, blocking}
 import scala.sys.process._
-import scala.util.{Failure, Try}
 import scalaz.{-\/, \/-}
 
-object ApkAdsCredentials extends LogProvider {
+import Utility._
+
+object ApkAdsCredentials extends Extractors with LogProvider {
 
   lazy val tmpDir = System.getProperty("java.io.tmpdir")
 
@@ -162,7 +162,10 @@ object ApkAdsCredentials extends LogProvider {
       ids <- ctx.run {
         GooglePlaySdkGeneralData.withName(adNetwork) map { _.id } take 1
       }
-      apps <- fetchSdkAppsWithManualFiltering(args.offset(), args.limit())(ids.head)
+      apps <- {
+        log.debug(s"Doing SdkApps.googlePlayAppsWithSdkId(${ids.head}) request...")
+        SdkApps.fetchWithManualFiltering(args.offset(), args.limit())("google_play", ids.head)
+      }
       paths <- Future.sequence(
         apps.map(findPackageS3Path)
       )
@@ -217,42 +220,6 @@ object ApkAdsCredentials extends LogProvider {
     }
   }
 
-  def findAdMobCred(sourcesPath: String) =
-    s"""grep -Rso -P -h ca-app-pub-[0-9]{16}/[0-9]{10} $sourcesPath""".lineStream_!
-
-  def findChartboostCred(sourcesPath: String) =
-    s"""grep -Rsow -P [0-9a-f]{40} $sourcesPath""".lineStream_! flatMap { row =>
-      val filenameAndMatching = row.split(":")
-
-      val withAppID = find24SymbolsHex(filenameAndMatching(0)) map {
-        (filenameAndMatching(1), _)
-      }
-      if (withAppID.isEmpty) log.warn(s"Only first match for: $row")
-
-      withAppID
-    }
-
-  def findRevmobCred(sourcesPath: String) = find24SymbolsHex(sourcesPath)
-
-  def findVungleCred(sourcesPath: String) = find24SymbolsHex(sourcesPath)
-
-  def findFacebookAudienceCred(sourcesPath: String) =
-    s"""grep -Rsow -P -h [0-9]{16}_[0-9]{16} $sourcesPath""".lineStream_!
-
-  def findAdColonyCred(sourcesPath: String) =
-    s"""grep -Rsow -P app[0-9a-f]{18} $sourcesPath""".lineStream_! flatMap { row =>
-      val filenameAndMatching = row.split(":")
-
-      val withAppID = s"""grep -Rsow -P vz[0-9a-f]{18} ${filenameAndMatching(0)}""".lineStream_! map {
-        (filenameAndMatching(1), _)
-      }
-      if (withAppID.isEmpty) log.warn(s"Only first match for: $row")
-
-      withAppID
-    }
-
-  private def find24SymbolsHex(sourcesPath: String) =
-    s"""grep -Rsow -P -h [0-9a-f]{24} $sourcesPath""".lineStream_!
 
   def client(conf: AmazonClientConnectionDef) = {
     import com.amazonaws.services.s3.AmazonS3Client
@@ -278,57 +245,6 @@ object ApkAdsCredentials extends LogProvider {
     conflicts(packageName, List(offset, limit, outputFile))
 
     verify()
-  }
-
-  // Workaround for Cassandra limitations
-  private def fetchSdkAppsWithManualFiltering(offset: Int, limit: Int)(id: Int)
-                                             (implicit ctx: CassandraAsyncContext[SnakeCase]): Future[List[String]] = {
-    import ctx._
-
-    val queriedValueProbability = 0.05
-    type Entries = List[(String, Option[Boolean])]
-
-    def fetchRecursively(offset: Int, preFilterOffset: Int = 0, acc: Entries = Nil): Future[Entries] = {
-      val queryLimit = ((limit + offset) / queriedValueProbability).toInt + preFilterOffset
-      log.debug(s"Doing SdkApps.googlePlayAppsWithSdkId($id) request...")
-
-      ctx.run {
-        SdkApps.googlePlayAppsWithSdkId(id, year = LocalDateTime.now.minusMonths(3).getYear)
-          .map(row => (row.appId, row.active))
-          .take(lift(queryLimit))
-      } flatMap { rows =>
-        val filtered = rows
-          .drop(preFilterOffset)
-          .filter{_._2.getOrElse(true)}
-          .drop(offset)
-
-        if (rows.lengthCompare(queryLimit) >= 0 && filtered.lengthCompare(limit) < 0)
-          fetchRecursively(0, queryLimit, acc ++ filtered)
-        else
-          Future.successful(acc ++ filtered)
-      }
-    }
-    fetchRecursively(offset) map {
-      _ take limit map { _._1 }
-    }
-  }
-
-  private def path(parts: String*) = parts.mkString(File.separator)
-
-  private def ifInterrupted[T](block: => T)(interruptedBlock: => Unit): T = {
-    Try { block }
-      .recoverWith { case e =>
-        interruptedBlock
-        Failure(e)
-      }
-      .get
-  }
-
-  private def withFinally[T](block: => T)(finallyBlock: => Unit): T = {
-    val result = Try { block }
-    finallyBlock
-
-    result.get
   }
 
 }
