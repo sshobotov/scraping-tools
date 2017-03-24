@@ -13,7 +13,7 @@ object ItunesConnectAppFiles {
     }
   }
 
-  def withAppleAppId[N <: NamingStrategy](appleAppId: String)(implicit ctx: CassandraAsyncContext[N]) = {
+  def withAppleAppId[N <: NamingStrategy](appleAppId: Int)(implicit ctx: CassandraAsyncContext[N]) = {
     import ctx._
 
     quote {

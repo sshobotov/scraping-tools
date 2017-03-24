@@ -12,7 +12,6 @@ import io.getquill.{CassandraAsyncContext, SnakeCase}
 import org.rogach.scallop.ScallopConf
 
 import scala.concurrent.{Await, ExecutionContext, Future, blocking}
-import scala.io.Source
 import scala.sys.process._
 import Utility._
 import org.apache.commons.io.{FileUtils, IOUtils}
@@ -82,29 +81,27 @@ object IpaAdsCredentials extends Extractors with ResultsOutput with LogProvider 
           }
 
         case (acc, (pkg, Failure(error))) =>
-          acc.copy(err = acc.err :+ (pkg, error.getCause))
+          acc.copy(err = acc.err :+ (pkg, error))
     }
 
     fileOutput.foreach(_.close)
     stats(collected, fileOutput.nonEmpty)
   }
 
-  private def matchCredentials(appleAppId: String, ipaUrl: String, matcher: String => Stream[(String, String)]) = {
+  private def matchCredentials(appleAppId: String, ipaUrl: String, matcher: String => Stream[(String, String)]) = Try {
     val targetFile = download(ipaUrl)
     val destinationDir = path(tmpDir, s"extracted_${appleAppId}_${System.currentTimeMillis}")
 
-    Try {
-      withFinally {
-        extractIpa(targetFile.getAbsolutePath, destinationDir)
+    withFinally {
+      extractIpa(targetFile.getAbsolutePath, destinationDir)
 
-        withFinally {
-          matcher(destinationDir).toSet
-        } {
-          FileUtils.deleteDirectory(Paths.get(destinationDir).toFile)
-        }
+      withFinally {
+        matcher(destinationDir).toSet
       } {
-        targetFile.delete()
+        FileUtils.deleteDirectory(Paths.get(destinationDir).toFile)
       }
+    } {
+      targetFile.delete()
     }
   }
 
@@ -113,7 +110,7 @@ object IpaAdsCredentials extends Extractors with ResultsOutput with LogProvider 
     import ctx._
 
     ctx.run {
-      ItunesConnectAppFiles.withAppleAppId(appleAppId)
+      ItunesConnectAppFiles.withAppleAppId(appleAppId.toInt)
     } map {
       _
         .filter(_.ipaUrl.nonEmpty)
@@ -137,7 +134,7 @@ object IpaAdsCredentials extends Extractors with ResultsOutput with LogProvider 
       }
       apps <- {
         log.debug(s"Doing SdkApps.fetchPaged(${ids.head}) request...")
-        SdkApps.fetchPaged(args.offset(), args.limit())("google_play", ids.head)
+        SdkApps.fetchPaged(args.offset(), args.limit())("itunes_connect", ids.head)
       }
       paths <- Future.sequence(
         apps.map(findIpaPath)
@@ -152,10 +149,14 @@ object IpaAdsCredentials extends Extractors with ResultsOutput with LogProvider 
     val pattern(_, prefix, suffix) = target.toURI.getPath
 
     val saveTo = File.createTempFile(prefix + "_", suffix)
-    val reader = Source.fromURL(target).reader
 
     ifInterrupted {
-      IOUtils.copy(reader, new FileOutputStream(saveTo))
+      val stream = target.openStream()
+      withFinally {
+        IOUtils.copy(stream, new FileOutputStream(saveTo))
+      } {
+        stream.close()
+      }
     } {
       saveTo.delete()
     }
