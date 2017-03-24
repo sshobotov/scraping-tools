@@ -13,12 +13,12 @@ object ItunesConnectAppFiles {
     }
   }
 
-  def withPackageName[N <: NamingStrategy](packageName: String)(implicit ctx: CassandraAsyncContext[N]) = {
+  def withAppleAppId[N <: NamingStrategy](appleAppId: String)(implicit ctx: CassandraAsyncContext[N]) = {
     import ctx._
 
     quote {
       all
-        .filter(_.vndAppleAppId == lift(packageName))
+        .filter(_.vndAppleAppId == lift(appleAppId))
         .sortBy(_.versionCode)(Ord.desc)
     }
   }

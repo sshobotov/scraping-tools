@@ -32,8 +32,8 @@ object SdkApps {
   }
 
   // Workaround for Cassandra limitations
-  def fetchWithManualFiltering[N <: NamingStrategy](offset: Int, limit: Int)(store: String, id: Int)
-                              (implicit ctx: CassandraAsyncContext[N], ec: ExecutionContext): Future[List[String]] = {
+  def fetchPaged(offset: Int, limit: Int)(store: String, id: Int)
+                (implicit ctx: CassandraAsyncContext[SnakeCase], ec: ExecutionContext): Future[List[String]] = {
     import ctx._
 
     val queriedValueProbability = 0.05

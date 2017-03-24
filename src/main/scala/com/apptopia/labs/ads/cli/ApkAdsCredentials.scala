@@ -22,7 +22,7 @@ import scalaz.{-\/, \/-}
 
 import Utility._
 
-object ApkAdsCredentials extends Extractors with LogProvider {
+object ApkAdsCredentials extends Extractors with ResultsOutput with LogProvider {
 
   lazy val tmpDir = System.getProperty("java.io.tmpdir")
 
@@ -71,20 +71,12 @@ object ApkAdsCredentials extends Extractors with LogProvider {
 
         Future.sequence {
           paths map { case (pkg, s3Path) =>
-            val destinationDir = path(tmpDir, s"extracted_${pkg}_${System.currentTimeMillis}")
-            val actions = extractApk(Bucket(storageConfig.getString("s3-bucket")), S3Key(s3Path), destinationDir)
-              .flatMap { extracted =>
-                Action.safe { _ =>
-                  withFinally {
-                    matchCred(extracted).toSet
-                  } {
-                    FileUtils.deleteDirectory(Paths.get(destinationDir).toFile)
-                  }
-                }
-              }
-
             Future {
-              blocking { actions.unsafePerform(s3Client).run }
+              blocking {
+                matchCredentials(pkg, Bucket(storageConfig.getString("s3-bucket")), S3Key(s3Path), matchCred)
+                  .unsafePerform(s3Client)
+                  .run
+              }
             } map { result =>
               for {
                 out         <- fileOutput
@@ -98,8 +90,6 @@ object ApkAdsCredentials extends Extractors with LogProvider {
 
       case _ => Future.failed(new Exception("No files was found"))
     }
-
-    case class Collected(ok: Seq[(String, Seq[Any])], notFound: Seq[String], err: Seq[(String, Throwable)])
 
     val collected = Await.result(processed, Duration.Inf)
       .foldLeft[Collected](Collected(Seq.empty, Seq.empty, Seq.empty)) {
@@ -115,27 +105,21 @@ object ApkAdsCredentials extends Extractors with LogProvider {
       }
 
     fileOutput.foreach(_.close)
+    stats(collected, fileOutput.nonEmpty)
+  }
 
-    log.info(s"Found credential entries:   ${collected.ok.size}")
-    log.info(s"Packages with no entries:   ${collected.notFound.size}")
-    log.info(s"Packages failed to process: ${collected.err.size}")
-
-    if (fileOutput.isEmpty && collected.ok.nonEmpty) {
-      log.info("\nFound:")
-      collected.ok foreach { case (pkg, entry) =>
-        log.info(s"$pkg ${entry.mkString("[", ", ", "]")}")
+  private def matchCredentials[T](pkg: String, bucket: Bucket, s3Key: S3Key, matcher: String => Stream[T]) = {
+    val destinationDir = path(tmpDir, s"extracted_${pkg}_${System.currentTimeMillis}")
+    extractApk(bucket, s3Key, destinationDir)
+      .flatMap { extracted =>
+        Action.safe { _ =>
+          withFinally {
+            matcher(extracted).toSet
+          } {
+            FileUtils.deleteDirectory(Paths.get(destinationDir).toFile)
+          }
+        }
       }
-    }
-    if (collected.notFound.nonEmpty) {
-      log.debug("\nNo matches:")
-      collected.notFound foreach log.debug
-    }
-    if (collected.err.nonEmpty) {
-      log.warn("\nErrors:")
-      collected.err foreach { case (pkg, e) =>
-        log.warn(pkg, e)
-      }
-    }
   }
 
   def findPackageS3Path(packageName: String)
@@ -163,8 +147,8 @@ object ApkAdsCredentials extends Extractors with LogProvider {
         GooglePlaySdkGeneralData.withName(adNetwork) map { _.id } take 1
       }
       apps <- {
-        log.debug(s"Doing SdkApps.googlePlayAppsWithSdkId(${ids.head}) request...")
-        SdkApps.fetchWithManualFiltering(args.offset(), args.limit())("google_play", ids.head)
+        log.debug(s"Doing SdkApps.fetchPaged(${ids.head}) request...")
+        SdkApps.fetchPaged(args.offset(), args.limit())("google_play", ids.head)
       }
       paths <- Future.sequence(
         apps.map(findPackageS3Path)
