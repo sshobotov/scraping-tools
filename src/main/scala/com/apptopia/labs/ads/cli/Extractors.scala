@@ -14,7 +14,7 @@ trait Extractors { self: LogProvider =>
       .map { case (row, idx) =>
         val filenameAndMatching = row.split(":")
 
-        val withAppID = find24SymbolsHex(filenameAndMatching(0)) map {
+        val withAppID = findSymbolsHex(filenameAndMatching(0), 24) map {
           (filenameAndMatching(1), _)
         }
         if (withAppID.isEmpty) log.warn(s"Only first match for: $row")
@@ -22,9 +22,9 @@ trait Extractors { self: LogProvider =>
         withAppID(idx)
       }
 
-  def findRevmobCred(sourcesPath: String) = find24SymbolsHex(sourcesPath)
+  def findRevmobCred(sourcesPath: String) = findSymbolsHex(sourcesPath, 24)
 
-  def findVungleCred(sourcesPath: String) = find24SymbolsHex(sourcesPath)
+  def findVungleCred(sourcesPath: String) = findSymbolsHex(sourcesPath, 24)
 
   def findFacebookAudienceCred(sourcesPath: String) =
     s"""grep -Rsow -P -h [0-9]{16}_[0-9]{16} $sourcesPath""".lineStream_!
@@ -43,7 +43,9 @@ trait Extractors { self: LogProvider =>
         withAppID(idx)
       }
 
-  private def find24SymbolsHex(sourcesPath: String) =
-    s"""grep -Rsow -P -h [0-9a-f]{24} $sourcesPath""".lineStream_!
+  def findMoPubCred(sourcesPath: String) = findSymbolsHex(sourcesPath, 32)
+
+  private def findSymbolsHex(sourcesPath: String, size: Int) =
+    s"""grep -Rsow -P -h [0-9a-f]{$size} $sourcesPath""".lineStream_!
 
 }

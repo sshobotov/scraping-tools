@@ -32,7 +32,8 @@ object ApkAdsCredentials extends Extractors with ResultsOutput with LogProvider 
     "revmob"      -> ("Revmob", findRevmobCred _),
     "vungle"      -> ("Vungle", findVungleCred _),
     "facebook"    -> ("Facebook Audience Network", findFacebookAudienceCred _),
-    "adcolony"    -> ("AdColony", findAdColonyCred _)
+    "adcolony"    -> ("AdColony", findAdColonyCred _),
+    "mopub"       -> ("MoPub", findMoPubCred _)
   )
 
   implicit val ec = ExecutionContext.fromExecutor(Executors.newFixedThreadPool(
@@ -81,7 +82,9 @@ object ApkAdsCredentials extends Extractors with ResultsOutput with LogProvider 
               for {
                 out         <- fileOutput
                 credentials <- result.toOption if credentials.nonEmpty
-              } yield out.println(s"$pkg ${credentials.mkString("[", ", ", "]")}")
+              } yield {
+                out.println(s"$pkg ${credentials.mkString("[", ", ", "]")}")
+              }
 
               (pkg, result)
             }
